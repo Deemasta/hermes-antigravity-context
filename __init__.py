@@ -11,16 +11,17 @@ get_model_context_length() resolves, in order:
                            because agy reportedly compacts near 256K despite advertising 1M)
   4. None -> base plugin behaviour (ANTIGRAVITY_CONTEXT_LENGTH / 200000)
 
-Matching is lowercased longest-family-prefix. Invalid env values are ignored
+Matching is lowercased longest-family-prefix on a separator boundary (`-_:@/`), so
+`gemini-4-hydrogen` matches `gemini-4-hydrogen-xhigh` but not `gemini-4-hydrogenx`. A future sibling
+such as `gemini-4-hydrogen-lite` still inherits the parent value until it gets its own table entry. Invalid env values are ignored
 with one warning each; nothing here raises.
 
-INVARIANT: the directory/plugin name MUST sort lexicographically AFTER
-`antigravity-oauth`. Provider plugins are imported in sorted order and
-register_provider() is last-writer-wins, so this is what makes our
-registration win. Renaming the directory to something that sorts earlier
-silently disables the plugin.
+LOAD ORDER: name the directory so it sorts AFTER `antigravity-oauth`. Provider plugins are imported in
+sorted order and register_provider() is last-writer-wins. On Hermes 0.23.1 an earlier-sorting name also
+happens to work (our get_provider_profile() miss forces a nested rescan that imports the base first), but
+that is incidental; install() logs a warning if the base is not found.
 
-The hot path (get_model_context_length) is pure table lookup. The `agy models`
+The hot path (get_model_context_length) is table lookup (re-reads the small JSON each call; no subprocess). The `agy models`
 subprocess is only run by report() / unmatched_live_models(), never at import
 and never during resolution.
 """
@@ -32,16 +33,13 @@ import logging
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 BASE_NAME = "antigravity-oauth"
 BUNDLED_TABLE = Path(__file__).resolve().parent / "context_table.json"
-DISCOVERY_TTL = 600  # seconds
 _warned: set[str] = set()
-_live_cache: dict = {"at": 0.0, "ids": None}
 
 
 def _warn_once(msg: str) -> None:
@@ -76,10 +74,11 @@ def _read_table_file(path) -> dict[str, int]:
         return out
     for fam, entry in items:
         n = _to_pos_int(entry.get("context") if isinstance(entry, dict) else entry)
-        if n is None:
+        key = str(fam).strip().lower()
+        if n is None or not key:  # an empty key would prefix-match every model
             _warn_once(f"ignoring invalid table entry {fam!r}")
         else:
-            out[str(fam).lower()] = n
+            out[key] = n
     return out
 
 
@@ -108,7 +107,7 @@ def parse_overrides(raw: str) -> dict[str, int]:
 def _family_lookup(table: dict[str, int], model: str) -> int | None:
     model = model.strip().lower()
     for fam in sorted(table, key=len, reverse=True):
-        if model.startswith(fam):
+        if model.startswith(fam) and (len(model) == len(fam) or model[len(fam)] in "-_:@/"):
             return table[fam]
     return None
 
@@ -134,23 +133,19 @@ def resolve(model) -> int | None:
 
 # --- live model discovery (diagnostics only; never on the resolution path) ---
 
-def live_model_ids(timeout: float = 5.0, force: bool = False) -> list[str] | None:
-    """Model ids from `agy models`, cached DISCOVERY_TTL seconds. None if unavailable."""
-    now = time.monotonic()
-    if not force and _live_cache["at"] and now - _live_cache["at"] < DISCOVERY_TTL:
-        return _live_cache["ids"]
-    ids = None
+def live_model_ids(timeout: float = 5.0) -> list[str] | None:
+    """Model ids from `agy models` (tab-separated `id<TAB>label`). None if unavailable."""
     agy = shutil.which("agy")
-    if agy:
-        try:
-            res = subprocess.run([agy, "models"], capture_output=True, text=True, timeout=timeout)
-            ids = [ln.split()[0] for ln in res.stdout.splitlines()
-                   if ln.strip() and "fetching" not in ln.lower()
-                   and any(k in ln.split()[0].lower() for k in ("gemini", "claude", "gpt"))]
-        except Exception as exc:  # noqa: BLE001
-            log.debug("antigravity-oauth-context: agy models failed: %s", exc)
-    _live_cache.update(at=now, ids=ids)
-    return ids
+    if not agy:
+        return None
+    try:
+        res = subprocess.run([agy, "models"], capture_output=True, text=True, timeout=timeout,
+                             stdin=subprocess.DEVNULL)
+        return [ln.split()[0] for ln in res.stdout.splitlines()
+                if ln.strip() and any(k in ln.split()[0].lower() for k in ("gemini", "claude", "gpt"))]
+    except Exception as exc:  # noqa: BLE001
+        log.debug("antigravity-oauth-context: agy models failed: %s", exc)
+        return None
 
 
 def unmatched_live_models(ids: list[str] | None = None) -> list[str]:
@@ -164,7 +159,7 @@ def unmatched_live_models(ids: list[str] | None = None) -> list[str]:
 
 
 def report(ids: list[str] | None = None) -> dict[str, int | None]:
-    """{live model id: resolved context or None}. Run: python -c 'import <pkg>; print(<pkg>.report())'."""
+    """{live model id: resolved context or None}. Run: python <plugin-dir>/__init__.py"""
     ids = live_model_ids() if ids is None else ids
     unmatched_live_models(ids)
     return {m: resolve(m) for m in ids or []}
@@ -178,7 +173,7 @@ def install() -> bool:
         from providers import get_provider_profile, register_provider
         base = get_provider_profile(BASE_NAME)
         if base is None:
-            log.debug("antigravity-oauth-context: %s not installed; no-op", BASE_NAME)
+            log.warning("antigravity-oauth-context: %s profile not found; context windows unchanged", BASE_NAME)
             return False
 
         class ContextAwareProfile(type(base)):
@@ -198,3 +193,7 @@ def install() -> bool:
 
 
 install()
+
+
+if __name__ == "__main__":  # diagnostics: the hyphenated dir name is not importable
+    print(json.dumps(report(), indent=2))

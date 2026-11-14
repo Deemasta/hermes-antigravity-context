@@ -67,10 +67,10 @@ def test_unknown_falls_back_to_base(monkeypatch):
 
 def test_longest_prefix_wins(monkeypatch, tmp_path):
     t = tmp_path / "t.json"
-    t.write_text(json.dumps({"families": {"gemini-4": 111, "gemini-4-hydrogen-x": {"context": 222}}}))
+    t.write_text(json.dumps({"families": {"gemini-4": 111, "gemini-4-hydrogen-lite": {"context": 222}}}))
     monkeypatch.setenv("ANTIGRAVITY_CONTEXT_TABLE", str(t))
     mod, _ = load(monkeypatch)
-    assert mod.resolve("gemini-4-hydrogen-xhigh") == 222
+    assert mod.resolve("gemini-4-hydrogen-lite-high") == 222
     assert mod.resolve("gemini-4-other") == 111
     assert mod.resolve("gemini-4-hydrogen-high") == 1048576  # bundled still merged
 
@@ -106,10 +106,85 @@ def test_garbage_env_ignored_with_single_warning(monkeypatch, caplog):
     assert len(msgs) == len(set(msgs)) == 6
 
 
-def test_cap_zero_or_negative_ignored(monkeypatch):
-    monkeypatch.setenv("ANTIGRAVITY_CONTEXT_CAP", "0")
+@pytest.mark.parametrize("cap", ["0", "-5", "abc", "1.5", " "])
+def test_bad_cap_ignored(monkeypatch, cap):
+    monkeypatch.setenv("ANTIGRAVITY_CONTEXT_CAP", cap)
     mod, _ = load(monkeypatch)
     assert mod.resolve("gemini-4-hydrogen") == 1048576
+
+
+@pytest.mark.parametrize("model,want", [
+    ("gemini-4-hydrogenx", None), ("gpt-oss-1200b", None), ("gemini-4-hydrogen", 1048576),
+    ("  GEMINI-4-HYDROGEN-HIGH ", 1048576), ("gemini-4-hydrogen:high", 1048576),
+])
+def test_prefix_boundary(monkeypatch, model, want):
+    mod, _ = load(monkeypatch)
+    assert mod.resolve(model) == want
+
+
+def test_bad_table_entries_skipped(monkeypatch, tmp_path):
+    t = tmp_path / "t.json"
+    t.write_text('{"families": {"": 5, "  ": 6, "g": true, "h": 1.5, "i": -1, "j": "x", " Gemini-9 ": 7}}')
+    monkeypatch.setenv("ANTIGRAVITY_CONTEXT_TABLE", str(t))
+    mod, _ = load(monkeypatch)
+    assert mod.resolve("unknown-model") is None  # empty key must not match everything
+    assert mod.resolve("gemini-9-x") == 7
+    assert "g" not in mod.load_table() and "h" not in mod.load_table()
+
+
+@pytest.mark.parametrize("body", ["", '{"families": ', "[]", '{"families": []}', '{"families": 3}', "null", "\xff\xfe"])
+def test_corrupt_custom_table_fails_open(monkeypatch, tmp_path, body):
+    t = tmp_path / "t.json"
+    t.write_bytes(body.encode("latin-1"))
+    monkeypatch.setenv("ANTIGRAVITY_CONTEXT_TABLE", str(t))
+    mod, reg = load(monkeypatch)
+    assert reg["antigravity-oauth"].get_model_context_length("gemini-4-hydrogen") == 1048576  # bundled intact
+
+
+def test_corrupt_bundled_table_falls_back_to_base(monkeypatch, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"families": {"gemini-4-hyd')
+    mod, reg = load(monkeypatch)
+    monkeypatch.setattr(mod, "BUNDLED_TABLE", bad)
+    assert reg["antigravity-oauth"].get_model_context_length("gemini-4-hydrogen") == 200_000
+    monkeypatch.setattr(mod, "BUNDLED_TABLE", tmp_path / "missing.json")
+    assert reg["antigravity-oauth"].get_model_context_length("gemini-4-hydrogen") == 200_000
+
+
+def test_yaml_table(monkeypatch, tmp_path):
+    t = tmp_path / "t.yaml"
+    t.write_text("families:\n  gemini-4-hydrogen: 300000\n")
+    monkeypatch.setenv("ANTIGRAVITY_CONTEXT_TABLE", str(t))
+    mod, _ = load(monkeypatch)
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        assert mod.resolve("gemini-4-hydrogen") == 1048576  # no PyYAML: file ignored, bundled intact
+    else:
+        assert mod.resolve("gemini-4-hydrogen") == 300000
+
+
+def test_resolver_exception_falls_back_to_base(monkeypatch):
+    mod, reg = load(monkeypatch)
+    monkeypatch.setattr(mod, "resolve", lambda m: 1 / 0)
+    assert reg["antigravity-oauth"].get_model_context_length("gemini-4-hydrogen") == 200_000
+
+
+def test_install_twice_still_works(monkeypatch):
+    mod, reg = load(monkeypatch)
+    assert mod.install() is True
+    assert reg["antigravity-oauth"].get_model_context_length("claude-opus-5-5") == 1000000
+    assert reg["antigravity-oauth"].get_model_context_length("zzz") == 200_000
+
+
+def test_non_dataclass_base_is_noop(monkeypatch):
+    prov = types.ModuleType("providers")
+    prov.get_provider_profile = lambda n: object()
+    prov.register_provider = lambda p: pytest.fail("must not register")
+    monkeypatch.setitem(sys.modules, "providers", prov)
+    spec = importlib.util.spec_from_file_location("ctxplug3", ROOT / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # must not raise
 
 
 def test_missing_base_is_noop(monkeypatch):
@@ -145,20 +220,21 @@ def test_discovery_stubbed(monkeypatch, caplog):
     assert "brand-new-gemini-9" in caplog.text
 
 
-def test_live_ids_cached_and_fail_open(monkeypatch):
+def test_live_ids_parse_and_fail_open(monkeypatch):
     mod, _ = load(monkeypatch)
-    calls = []
+    seen = {}
 
     def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return types.SimpleNamespace(stdout="Fetching models...\ngemini-4-argon-high  x\nclaude-opus-5-5-low\nnoise\n")
+        seen.update(cmd=cmd, **kw)
+        return types.SimpleNamespace(stdout="Fetching available models...\ngemini-4-argon-high\tGemini 4\nclaude-opus-5-5-low\nnoise\n")
     monkeypatch.setattr(mod.shutil, "which", lambda _: "/fake/agy")
     monkeypatch.setattr(mod.subprocess, "run", fake_run)
     assert mod.live_model_ids() == ["gemini-4-argon-high", "claude-opus-5-5-low"]
-    mod.live_model_ids()
-    assert len(calls) == 1 and calls[0][1:] == ["models"]
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    assert mod.live_model_ids(force=True) is None
+    assert seen["cmd"] == ["/fake/agy", "models"] and seen["timeout"] and "shell" not in seen
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(mod.subprocess.TimeoutExpired("agy", 5)))
+    assert mod.live_model_ids() is None
+    monkeypatch.setattr(mod.shutil, "which", lambda _: None)
+    assert mod.live_model_ids() is None and mod.report() == {}
 
 
 def test_resolve_never_calls_agy(monkeypatch):
