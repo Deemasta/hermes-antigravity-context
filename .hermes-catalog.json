@@ -1,0 +1,6 @@
+{
+  "catalog_name": "antigravity-oauth-context",
+  "repo": "https://github.com/Deemasta/hermes-antigravity-context",
+  "tier": "community",
+  "description": "Correct per-model context-window metadata for Antigravity (agy) models"
+}
