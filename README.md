@@ -122,7 +122,7 @@ Observed on a temporary `HERMES_HOME`, for `gemini-4-hydrogen-high`, `gemini-4-h
 | With the plugin | `1048576 1048576 1048576 1048576 1000000 1000000 131072 200000` |
 | With `ANTIGRAVITY_CONTEXT_CAP=262144` | `262144 262144 262144 262144 262144 262144 131072 200000` |
 
-Consequence for compression: at `compression.threshold` 0.5 the trigger moves from 100k tokens (0.5 x the flat 200k window) to about 524k tokens (0.5 x 1048576) for a Gemini model.
+Consequence for compression: with `compression.threshold` 0.5 the trigger for a Gemini model moves from 150k tokens to about 524k. The 150k is not 0.5 x 200000 — Hermes raises the effective threshold to 0.75 for windows at or below 512k (`_SMALL_CTX_WINDOW_LIMIT` / `_SMALL_CTX_THRESHOLD_PERCENT` in `agent/context_compressor.py`), so the flat 200k window triggers at 0.75 x 200000. Above 512k the configured 0.5 applies, giving 0.5 x 1048576.
 
 ## Caveats and residual risk
 
