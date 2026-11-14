@@ -1,0 +1,12 @@
+name: antigravity-oauth-context
+manifest_version: 2
+version: 0.1.0
+kind: model-provider
+description: "Companion for antigravity-oauth: reports per-model context windows (Gemini 1M, Claude 1M, GPT-OSS 128K) instead of a flat 200K, so Hermes compresses at the right time."
+license: MIT
+homepage: https://github.com/Deemasta/hermes-antigravity-context
+platforms:
+  - linux
+  - macos
+requires_hermes: ">=0.21.0"
+capabilities: []

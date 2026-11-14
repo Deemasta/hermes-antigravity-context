@@ -1,0 +1,11 @@
+{
+  "_comment": "Context window (tokens) per model family. Matched by lowercased longest prefix, so effort-suffixed ids (gemini-4-hydrogen-xhigh) resolve. confirmed=false means the upstream vendor value is used and the Antigravity-served window is unverified.",
+  "families": {
+    "gemini-4-hydrogen": {"context": 1048576, "confirmed": true,  "source": "https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen"},
+    "gemini-4-argon":    {"context": 1048576, "confirmed": true,  "source": "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon"},
+    "gemini-3.8-flash":  {"context": 1048576, "confirmed": true,  "source": "https://ai.google.dev/gemini-api/docs/tokens (1,048,576 input)"},
+    "claude-opus-5-5":   {"context": 1000000, "confirmed": false, "source": "https://platform.claude.com/docs/en/models/opus-5-5/overview (upstream API value)"},
+    "claude-sonnet-5-5": {"context": 1000000, "confirmed": false, "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview (upstream API value)"},
+    "gpt-oss-120b":      {"context": 131072,  "confirmed": false, "source": "https://huggingface.co/openai/gpt-oss-120b (upstream model card)"}
+  }
+}
